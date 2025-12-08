@@ -1,0 +1,33 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  wxapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wxapp
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount your code for development (optional - comment out for production)
+      - ./app.py:/app/app.py
+      - ./config.py:/app/config.py
+      - ./om_extract.py:/app/om_extract.py
+      - ./data_sources:/app/data_sources
+      - ./views:/app/views
+      - ./utils:/app/utils
+      # Mount site list if it exists
+      - ./siteList.csv:/app/siteList.csv:ro
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

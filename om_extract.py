@@ -1,5 +1,7 @@
 import requests
 import pandas as pd
+from typing import List
+import re
 
 def getData(lat, lon, sites, variables=['temperature_2m','cloud_cover'], models=['ecmwf_ifs025','ecmwf_aifs025','bom_access_global','gfs_global', 'cma_grapes_global','ukmo_global_deterministic_10km']):
     """
@@ -103,3 +105,212 @@ def getDailyData(lat, lon, sites, variables=['temperature_2m_max','temperature_2
         return pd.concat(dlist)
 
     return makeFrame(data)
+
+
+import pandas as pd
+import requests
+from typing import List, Dict
+
+def getEnsembleData(lat_list: List[str], lon_list: List[str], site_list: List[str], 
+                    variables: List[str], models: List[str]) -> pd.DataFrame:
+    """
+    Fetch ensemble forecast data from Open-Meteo Ensemble API, handling the flat member-per-column structure.
+    
+    Args:
+        lat_list: List of latitude strings
+        lon_list: List of longitude strings  
+        site_list: List of site names
+        variables: List of variable names to fetch (e.g., ['temperature_2m'])
+        models: List of ensemble model names
+    
+    Returns:
+        DataFrame with datetime index and columns following 'variable_model_member_XX' convention.
+    """
+    
+    # Map model names to API parameters
+    model_mapping: Dict[str, str] = {
+        'ecmwf_ifs_ensemble': 'ecmwf_ifs025',
+        'gfs_ensemble': 'gfs025',
+    }
+    
+    all_site_model_data = []
+    
+    # We use the internal API model name for column construction
+    # We assume only one model is requested per API call, matching the structure of your original code
+    
+    for lat, lon, site in zip(lat_list, lon_list, site_list):
+        for model in models:
+            api_model = model_mapping.get(model, model)
+            
+            # Build API URL
+            base_url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+            
+            params = {
+                'latitude': lat,
+                'longitude': lon,
+                'hourly': ','.join(variables),
+                'models': api_model,
+                'timezone': 'auto'
+            }
+            
+            try:
+                response = requests.get(base_url, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'hourly' not in data:
+                    print(f"No hourly data found for {site} with {model}")
+                    continue
+                
+                # 1. Parse the datetime index
+                times = pd.to_datetime(data['hourly']['time'])
+                # Start a wide DataFrame for this site/model combination
+                df_temp = pd.DataFrame({'time': times, 'site': site})
+                
+                # 2. Iterate through ALL keys returned in 'hourly' to find members
+                for variable_key, var_values in data['hourly'].items():
+                    if variable_key == 'time':
+                        continue
+
+                    # Check if the variable key is one of the variables we requested (e.g., 'temperature_2m')
+                    base_variable = next((v for v in variables if variable_key.startswith(v)), None)
+                    
+                    if base_variable:
+                        # Case A: Control member (e.g., 'temperature_2m')
+                        if variable_key == base_variable:
+                            col_name = f"{base_variable}_{model}" # Deterministic column name
+                            df_temp[col_name] = var_values
+                            
+                        # Case B: Numbered member (e.g., 'temperature_2m_member01')
+                        elif variable_key.startswith(f"{base_variable}_member"):
+                            # Extract the member number (e.g., '01') and format it consistently
+                            match = re.search(r'member(\d+)', variable_key)
+                            if match:
+                                member_idx = int(match.group(1)) # Convert to int
+                                # Use f-string for consistent member naming like in the plotting function
+                                col_name = f"{base_variable}_{model}_member_{member_idx:02d}"
+                                df_temp[col_name] = var_values
+                            
+                # Append the resulting wide DataFrame for this site/model
+                all_site_model_data.append(df_temp)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching ensemble data for {site} with {model}: {e}")
+                continue
+            except Exception as e:
+                print(f"Error parsing ensemble data for {site} with {model}: {e}")
+                continue
+    
+    if not all_site_model_data:
+        return pd.DataFrame()
+    
+    # Use functools.reduce for robustly merging all wide DataFrames on 'time' and 'site'
+    from functools import reduce
+    result_df = reduce(lambda left, right: pd.merge(left, right, on=['time', 'site'], how='outer'), 
+                       all_site_model_data)
+
+    # Final formatting: Set time as index and drop the site column
+    result_df = result_df.set_index('time')
+    result_df = result_df.drop(columns=['site'])
+    return result_df
+
+def getDailyEnsembleData(lat_list: List[str], lon_list: List[str], site_list: List[str],
+                         variables: List[str], models: List[str]) -> pd.DataFrame:
+    """
+    Fetch daily ensemble forecast data from Open-Meteo Ensemble API
+    
+    Args:
+        lat_list: List of latitude strings
+        lon_list: List of longitude strings
+        site_list: List of site names
+        variables: List of daily variable names to fetch
+        models: List of ensemble model names
+    
+    Returns:
+        DataFrame with datetime index and columns for each variable_model_member combination
+    """
+    
+    # Map model names to API parameters
+    model_mapping = {
+        'ecmwf_ifs_ensemble': 'ecmwf_ifs025',
+        'gfs_ensemble': 'gfs025',
+        'bom_access_global_ensemble': 'bom_access_global_ensemble'
+    }
+    
+    all_data = []
+    
+    for lat, lon, site in zip(lat_list, lon_list, site_list):
+        for model in models:
+            api_model = model_mapping.get(model, model)
+            
+            # Build API URL
+            base_url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+            
+            params = {
+                'latitude': lat,
+                'longitude': lon,
+                'daily': ','.join(variables),
+                'models': api_model,
+                'timezone': 'auto'
+            }
+            
+            try:
+                response = requests.get(base_url, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'daily' not in data:
+                    continue
+                
+                # Parse the datetime
+                times = pd.to_datetime(data['daily']['time'])
+                
+                # Extract data for each variable and ensemble member
+                for variable in variables:
+                    if variable in data['daily']:
+                        var_data = data['daily'][variable]
+                        
+                        # Check if it's ensemble data (list of lists) or single value (list)
+                        if isinstance(var_data[0], list):
+                            # Ensemble data - multiple members
+                            num_members = len(var_data[0])
+                            
+                            for member_idx in range(num_members):
+                                member_values = [timestep[member_idx] for timestep in var_data]
+                                col_name = f"{variable}_{model}_member_{member_idx:02d}"
+                                
+                                df_temp = pd.DataFrame({
+                                    'time': times,
+                                    col_name: member_values,
+                                    'site': site
+                                })
+                                all_data.append(df_temp)
+                        else:
+                            # Single deterministic value
+                            col_name = f"{variable}_{model}"
+                            df_temp = pd.DataFrame({
+                                'time': times,
+                                col_name: var_data,
+                                'site': site
+                            })
+                            all_data.append(df_temp)
+                            
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching daily ensemble data for {site} with {model}: {e}")
+                continue
+            except Exception as e:
+                print(f"Error parsing daily ensemble data for {site} with {model}: {e}")
+                continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    # Merge all dataframes
+    result_df = all_data[0]
+    for df in all_data[1:]:
+        result_df = pd.merge(result_df, df, on=['time', 'site'], how='outer')
+    
+    result_df = result_df.set_index('time')
+    result_df = result_df.drop(columns=['site'])
+    
+    return result_df

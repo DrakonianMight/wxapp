@@ -16,7 +16,6 @@ def check_nearby_station(lat: float, lon: float, max_distance_km: float = 1.0):
         # Convert km to meters for meteostat's radius parameter
         radius_meters = max_distance_km * 1000
         stations = Stations().nearby(lat, lon, radius=radius_meters).fetch(1)
-        print(stations)
         if not stations.empty:
             station = stations.iloc[0]
             # Get distance from station data (in meters if available)
@@ -107,7 +106,6 @@ def render_deterministic_view(
     # Check for nearby observation station
     has_nearby_station, station_info, distance = check_nearby_station(lat, lon, max_distance_km=obs_distance_km)
     df_obs = None
-    print(has_nearby_station, station_info, distance)
     if has_nearby_station:
         st.info(f"📍 Observation station '{station_info['name']}' found {distance:.2f} km away")
         
@@ -116,12 +114,12 @@ def render_deterministic_view(
         obs_source = MeteostatObsDataSource()
         
         @st.cache_data(ttl=3600)
-        def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days):
-            return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days)
+        def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days, timezone):
+            return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days, timezone)
         
         with st.spinner("Fetching observation data..."):
             df_obs = get_cached_obs_data(
-                lat, lon, site, variables_to_fetch, selected_data_type, previous_days=1
+                lat, lon, site, variables_to_fetch, selected_data_type, previous_days=2, timezone=timezone
             )
             
         if df_obs is not None and not df_obs.empty:

@@ -164,12 +164,12 @@ def render_ensemble_view(
         obs_source = MeteostatObsDataSource()
         
         @st.cache_data(ttl=3600)
-        def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days):
-            return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days)
+        def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days, timezone):
+            return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days, timezone)
         
         with st.spinner("Fetching observation data..."):
             df_obs = get_cached_obs_data(
-                lat, lon, site, [selected_variable], selected_data_type, previous_days=7
+                lat, lon, site, [selected_variable], selected_data_type, previous_days=2, timezone=timezone
             )
             
         if df_obs is not None and not df_obs.empty:
@@ -187,7 +187,8 @@ def render_ensemble_view(
         show_percentiles=show_percentiles,
         show_members=show_members,
         df_obs=df_obs,
-        timezone=timezone
+        timezone=timezone,
+        thresholds=thresholds if enable_threshold else None
     )
     st.plotly_chart(fig, use_container_width=True)
     

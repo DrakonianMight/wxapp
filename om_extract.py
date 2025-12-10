@@ -150,7 +150,7 @@ def getEnsembleData(lat_list: List[str], lon_list: List[str], site_list: List[st
                 'longitude': lon,
                 'hourly': ','.join(variables),
                 'models': api_model,
-                'timezone': 'auto'
+                'timezone': 'GMT'
             }
             
             try:

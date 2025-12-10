@@ -218,7 +218,8 @@ def create_ensemble_plot(
     show_percentiles: bool = True,
     show_members: bool = False,
     df_obs: pd.DataFrame = None,
-    timezone: str = 'UTC'
+    timezone: str = 'UTC',
+    thresholds: List[float] = None
 ) -> go.Figure:
     """
     Create ensemble forecast plot with percentiles and/or individual members
@@ -228,6 +229,11 @@ def create_ensemble_plot(
         variable: Variable name to plot
         models: List of ensemble model names
         color_map: Dictionary mapping models to colors
+        show_percentiles: Whether to show percentile bands
+        show_members: Whether to show individual ensemble members
+        df_obs: Optional DataFrame with observation data to overlay
+        timezone: Timezone for displaying dates (default: 'UTC')
+        thresholds: Optional list of threshold values to display as horizontal lines
         show_percentiles: Whether to show percentile bands
         show_members: Whether to show individual ensemble members
         df_obs: Optional DataFrame with observation data to overlay
@@ -247,10 +253,12 @@ def create_ensemble_plot(
         tz = pytz.timezone(timezone)
         if isinstance(df_plot.index, pd.DatetimeIndex):
             if df_plot.index.tz is None:
+                # Localize to UTC first, then convert to target timezone
                 df_plot.index = df_plot.index.tz_localize('UTC').tz_convert(tz)
             else:
                 df_plot.index = df_plot.index.tz_convert(tz)
     except Exception as e:
+        print(f"Warning: Could not convert forecast timezone: {e}")
         pass  # If conversion fails, use original timezone
     
     for model in models:
@@ -347,16 +355,21 @@ def create_ensemble_plot(
             tz = pytz.timezone(timezone)
             if 'datetime' in df_obs_plot.columns:
                 if pd.api.types.is_datetime64_any_dtype(df_obs_plot['datetime']):
+                    # Check if already timezone-aware
                     if df_obs_plot['datetime'].dt.tz is None:
+                        # Localize to UTC first, then convert
                         df_obs_plot['datetime'] = df_obs_plot['datetime'].dt.tz_localize('UTC').dt.tz_convert(tz)
                     else:
+                        # Already timezone-aware, just convert
                         df_obs_plot['datetime'] = df_obs_plot['datetime'].dt.tz_convert(tz)
             elif isinstance(df_obs_plot.index, pd.DatetimeIndex):
                 if df_obs_plot.index.tz is None:
                     df_obs_plot.index = df_obs_plot.index.tz_localize('UTC').tz_convert(tz)
                 else:
+                    # Already timezone-aware, just convert
                     df_obs_plot.index = df_obs_plot.index.tz_convert(tz)
         except Exception as e:
+            print(f"Warning: Could not convert observation timezone: {e}")
             pass  # If conversion fails, use original timezone
         
         if variable in df_obs_plot.columns:
@@ -450,6 +463,39 @@ def create_ensemble_plot(
             )
         except Exception:
             pass  # If this also fails, skip the current time line
+    
+    # Add horizontal threshold lines if provided
+    if thresholds:
+        threshold_colors = ['orange', 'purple', 'brown']  # Different colors for different thresholds
+        for i, threshold in enumerate(thresholds):
+            color = threshold_colors[i % len(threshold_colors)]
+            
+            # Add horizontal line
+            fig.add_shape(
+                type="line",
+                x0=0,
+                x1=1,
+                xref="paper",
+                y0=threshold,
+                y1=threshold,
+                line=dict(
+                    color=color,
+                    width=2,
+                    dash="dot"
+                )
+            )
+            
+            # Add annotation for the threshold
+            fig.add_annotation(
+                x=1.01,
+                xref="paper",
+                y=threshold,
+                text=f"Threshold: {threshold}",
+                showarrow=False,
+                font=dict(color=color, size=10),
+                xanchor="left",
+                yanchor="middle"
+            )
     
     return fig
 

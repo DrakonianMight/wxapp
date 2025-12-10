@@ -24,8 +24,10 @@ class MeteostatObsDataSource(DataSource):
             'wdir': 'wind_direction_10m',
             'wspd': 'wind_speed_10m',
             'wpgt': 'wind_gusts_10m',
-            'coco': 'cloud_cover',
-            # Note: meteostat doesn't have shortwave_radiation directly
+            'pres': 'surface_pressure',
+            'prcp': 'precipitation',
+            # Note: meteostat doesn't have shortwave_radiation or cloud_cover percentage
+            # 'coco' is a weather condition code, not cloud cover percentage
         }
         
         # Reverse mapping for translating requested variables to meteostat columns
@@ -39,7 +41,8 @@ class MeteostatObsDataSource(DataSource):
         variables: List[str], 
         data_type: str,
         models: List[str],
-        previous_days: int = 7
+        previous_days: int = 1,
+        timezone: str = 'UTC'
     ) -> pd.DataFrame:
         """
         Fetch historical observation data from Meteostat
@@ -52,6 +55,7 @@ class MeteostatObsDataSource(DataSource):
             data_type: 'hourly' or 'daily' (currently only hourly supported)
             models: Not used for observations, kept for interface consistency
             previous_days: Number of days of historical data to retrieve
+            timezone: Target timezone for the datetime index (default: 'UTC')
         
         Returns:
             DataFrame with standardized column names and structure
@@ -60,9 +64,9 @@ class MeteostatObsDataSource(DataSource):
             st.warning("Meteostat observations currently only supports hourly data")
             return pd.DataFrame()
         
-        # Get meteostat data
+        # Get meteostat data with timezone conversion
         locations = [(lat, lon)]
-        raw_data = ms_extract.main(locations, previous_days=previous_days)
+        raw_data = ms_extract.main(locations, previous_days=previous_days, timezone=timezone)
         
         if raw_data is None or raw_data.empty:
             return pd.DataFrame()
@@ -91,10 +95,20 @@ class MeteostatObsDataSource(DataSource):
         """
         df = raw_data.copy()
         
-        # Rename index to 'time' if it's a DatetimeIndex
+        # The raw_data from ms_extract has a timezone-aware DatetimeIndex
+        # Reset it to create a 'datetime' column, preserving timezone info
         if isinstance(df.index, pd.DatetimeIndex):
+            # Reset index - this creates a column (usually named 'time' by meteostat or index name)
             df = df.reset_index()
-            df = df.rename(columns={'time': 'datetime'})
+            # Find the datetime column (could be 'time', 'index', or unnamed)
+            datetime_col = None
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    datetime_col = col
+                    break
+            
+            if datetime_col and datetime_col != 'datetime':
+                df = df.rename(columns={datetime_col: 'datetime'})
         elif 'time' in df.columns:
             df = df.rename(columns={'time': 'datetime'})
         
@@ -135,33 +149,46 @@ class MeteostatObsDataSource(DataSource):
         if 'datetime' in df.columns:
             df = df.sort_values('datetime')
         
+        # If no data variables are available, return empty DataFrame
+        if not available_vars:
+            return pd.DataFrame()
+        
         return df
     
     def _convert_units(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Convert meteostat units to match other data sources if needed
+        Convert meteostat units to match Open-Meteo/standard data sources
         
-        Meteostat returns:
-        - temp, dwpt: °C (matches our standard)
-        - rhum: % (matches our standard)
-        - wspd, wpgt: km/h (needs conversion to m/s)
-        - wdir: degrees (matches our standard)
-        - coco: weather condition code (not percentage)
+        Meteostat units → Standard units:
+        - temp, dwpt: °C → °C (no conversion needed)
+        - rhum: % → % (no conversion needed)
+        - wspd, wpgt: km/h → m/s (divide by 3.6)
+        - wdir: degrees → degrees (no conversion needed)
+        - pres: hPa → hPa (no conversion needed)
+        - prcp: mm → mm (no conversion needed)
+        
+        Note: Meteostat does not provide:
+        - shortwave_radiation
+        - cloud_cover (percentage) - only condition code
         """
         df = df.copy()
         
-        # Convert wind speed from km/h to m/s
+        # Convert wind speed from km/h to m/s (1 km/h = 0.27778 m/s)
         wind_cols = ['wind_speed_10m', 'wind_gusts_10m']
         for col in wind_cols:
             if col in df.columns:
-                df[col] = df[col] / 3.6  # km/h to m/s
+                # Convert km/h to m/s
+                df[col] = df[col] / 3.6
         
-        # Note: cloud_cover in meteostat is a condition code, not a percentage
-        # You may want to handle this differently or exclude it
-        if 'cloud_cover' in df.columns:
-            # This is actually the condition code, not cloud cover percentage
-            # Consider renaming or creating a mapping
-            st.info("Note: Meteostat 'cloud_cover' is actually a weather condition code, not a percentage")
+        # Ensure pressure is in hPa (Meteostat provides hPa, Open-Meteo uses hPa)
+        if 'surface_pressure' in df.columns:
+            # No conversion needed - both use hPa
+            pass
+        
+        # Ensure precipitation is in mm (Meteostat provides mm, Open-Meteo uses mm)
+        if 'precipitation' in df.columns:
+            # No conversion needed - both use mm
+            pass
         
         return df
     
@@ -196,7 +223,11 @@ class MeteostatObsDataSource(DataSource):
                 'wind_direction_10m',
                 'wind_speed_10m',
                 'wind_gusts_10m',
-                # 'cloud_cover',  # Commented out since it's actually a condition code
+                'surface_pressure',
+                'precipitation',
+                # Note: Meteostat does not provide:
+                # - 'shortwave_radiation'
+                # - 'cloud_cover' (only condition code, not percentage)
             ]
         else:
             # Daily aggregations could be added in the future

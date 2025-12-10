@@ -46,4 +46,6 @@ YAXIS_TITLES = {
     'dewpoint_2m': 'Dewpoint Temperature at 2m (°C)',
     'temperature_2m_max': 'Max Temperature at 2m (°C)',
     'temperature_2m_min': 'Min Temperature at 2m (°C)',
+    'surface_pressure': 'Surface Pressure (hPa)',
+    'precipitation': 'Precipitation (mm)',
 }

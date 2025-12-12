@@ -10,3 +10,9 @@ requests>=2.31.0
 python-dateutil>=2.8.2
 meteostat>=1.6.0
 pytz>=2023.3
+
+# AWS API data source dependencies
+boto3>=1.28.0
+xarray>=2023.0.0
+netCDF4>=1.6.0
+h5netcdf>=1.0.0

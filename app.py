@@ -15,9 +15,18 @@ from config import (
 from data_sources.open_meteo import OpenMeteoDataSource
 from data_sources.meteostat_obs import MeteostatObsDataSource
 
+# Import AWS API data source components
+try:
+    from data_sources.aws_api import AWSAPIDataSource
+    from utils.cognito_auth import CognitoAuth
+    AWS_API_AVAILABLE = True
+except ImportError:
+    AWS_API_AVAILABLE = False
+
 # Import views
 from views.deterministic_view import render_deterministic_view
 from views.ensemble_view import render_ensemble_view
+from views.metadata_view import show_metadata_view
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -26,12 +35,36 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Initialize Data Sources ---
-# You can add more data sources here
-DATA_SOURCES = {
-    'Open-Meteo': OpenMeteoDataSource(),
-    # 'Another Source': AnotherDataSource(),  # Add more as needed
-}
+# --- Initialize Session State ---
+if 'aws_authenticated' not in st.session_state:
+    st.session_state['aws_authenticated'] = False
+    st.session_state['aws_id_token'] = None
+    st.session_state['aws_base_url'] = 'https://fmeq0xvw60.execute-api.ap-southeast-2.amazonaws.com/prod'
+    st.session_state['aws_domain'] = 'brisbane'
+    st.session_state['aws_domain_changed'] = False
+    st.session_state['aws_just_authenticated'] = False
+
+# Function to get current data sources (dynamically includes AWS if authenticated)
+def get_data_sources():
+    """Return dictionary of available data sources based on authentication state"""
+    sources = {
+        'Open-Meteo': OpenMeteoDataSource(),
+        # Add more static sources here
+    }
+    
+    # Add AWS API data source if authenticated
+    if AWS_API_AVAILABLE and st.session_state.get('aws_authenticated', False):
+        try:
+            aws_ds = AWSAPIDataSource(
+                base_url=st.session_state['aws_base_url'],
+                id_token=st.session_state['aws_id_token'],
+                domain=st.session_state.get('aws_domain', 'brisbane')
+            )
+            sources['AWS API (GSO/ACCESS)'] = aws_ds
+        except Exception as e:
+            st.warning(f"Failed to initialize AWS API data source: {str(e)}")
+    
+    return sources
 
 # Initialize observations source (always available for overlay)
 OBS_SOURCE = MeteostatObsDataSource()
@@ -77,22 +110,153 @@ with st.sidebar:
     
     # Forecast type selector
     forecast_type = st.radio(
-        "Forecast Type",
-        options=['Deterministic', 'Probabilistic/Ensemble'],
+        "View Mode",
+        options=['Deterministic', 'Probabilistic/Ensemble', 'Metadata'],
         key='forecast_type_radio',
-        help="Choose between single-value deterministic forecasts or ensemble/probabilistic forecasts"
+        help="Choose between forecasts or view metadata about models and data sources"
     )
     st.session_state['forecast_type'] = forecast_type
     
     st.markdown("---")
     
-    # Data source selector
-    selected_source_name = st.selectbox(
-        'Data Source',
-        options=list(DATA_SOURCES.keys()),
-        key='data_source_select'
+    # AWS API Authentication Section
+    if AWS_API_AVAILABLE:
+        with st.expander("🔐 AWS API Authentication", expanded=not st.session_state.get('aws_authenticated', False)):
+            if not st.session_state.get('aws_authenticated', False):
+                st.info("Enter your AWS credentials to access GSO and ACCESS models")
+                
+                # AWS Cognito configuration (you can move these to environment variables)
+                user_pool_id = st.text_input(
+                    "User Pool ID",
+                    value="ap-southeast-2_T7xOIMSJh",
+                    key='aws_user_pool_id',
+                    type='password'
+                )
+                
+                client_id = st.text_input(
+                    "Client ID",
+                    value="1quihqsjtc5iq0f745phcd19",
+                    key='aws_client_id',
+                    type='password'
+                )
+                
+                username = st.text_input("Username", key='aws_username')
+                password = st.text_input("Password", type='password', key='aws_password')
+                
+                # Domain selection for ACCESS-CE
+                domain = st.selectbox(
+                    "Domain (for ACCESS-CE)",
+                    options=['brisbane', 'adelaide', 'sydney', 'darwin', 'canberra', 
+                             'hobart', 'melbourne', 'perth', 'nqld'],
+                    index=None,
+                    placeholder="Select a domain...",
+                    key='aws_domain_select'
+                )
+                
+                if st.button("Login", key='aws_login_btn'):
+                    if not username or not password:
+                        st.error("Please enter username and password")
+                    else:
+                        with st.spinner("Authenticating..."):
+                            try:
+                                auth = CognitoAuth(user_pool_id, client_id)
+                                success, id_token, error = auth.authenticate(username, password)
+                                
+                                if success:
+                                    st.session_state['aws_authenticated'] = True
+                                    st.session_state['aws_id_token'] = id_token
+                                    st.session_state['aws_domain'] = domain
+                                    st.session_state['aws_just_authenticated'] = True  # Flag for success message
+                                    st.success("✅ Authentication successful! AWS models (GSO, ACCESS-G, ACCESS-GE, ACCESS-CE) are now available.")
+                                    st.info("💡 Select 'AWS API (GSO/ACCESS)' from the Data Source dropdown to use these models.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ Authentication failed: {error}")
+                            except Exception as e:
+                                st.error(f"❌ Authentication error: {str(e)}")
+            else:
+                st.success("✅ Authenticated with AWS API")
+                st.caption(f"Current domain: {st.session_state.get('aws_domain', 'brisbane')}")
+                
+                # Allow changing domain
+                prev_domain = st.session_state.get('aws_domain', 'brisbane')
+                domain = st.selectbox(
+                    "Change Domain (for ACCESS-CE)",
+                    options=['brisbane', 'adelaide', 'sydney', 'darwin', 'canberra', 
+                             'hobart', 'melbourne', 'perth', 'nqld'],
+                    index=['brisbane', 'adelaide', 'sydney', 'darwin', 'canberra', 
+                           'hobart', 'melbourne', 'perth', 'nqld'].index(prev_domain),
+                    key='aws_domain_change',
+                    help="Changing domain will reload metadata for ACCESS-CE model"
+                )
+                
+                if domain != prev_domain:
+                    st.session_state['aws_domain'] = domain
+                    st.info(f"Domain changed to {domain}. Reloading...")
+                    st.rerun()
+                
+                if st.button("Logout", key='aws_logout_btn'):
+                    st.session_state['aws_authenticated'] = False
+                    st.session_state['aws_id_token'] = None
+                    st.rerun()
+    
+    st.markdown("---")
+    
+    # Get current data sources (dynamic based on authentication)
+    DATA_SOURCES = get_data_sources()
+    
+    # Show success message if AWS just became available
+    if 'aws_just_authenticated' in st.session_state and st.session_state['aws_just_authenticated']:
+        st.success("🎉 AWS API data source is now available! Select it from the multi-select below.")
+        st.session_state['aws_just_authenticated'] = False  # Clear flag
+    
+    # Multi-source selector - allow selecting multiple data sources
+    source_options = list(DATA_SOURCES.keys())
+    
+    # Initialize previous selections
+    if 'selected_data_sources' not in st.session_state:
+        st.session_state['selected_data_sources'] = [source_options[0]] if source_options else []
+    
+    # Preserve previous selections that are still available
+    default_sources = [s for s in st.session_state.get('selected_data_sources', []) if s in source_options]
+    if not default_sources and source_options:
+        default_sources = [source_options[0]]
+    
+    selected_source_names = st.multiselect(
+        'Data Sources',
+        options=source_options,
+        default=default_sources,
+        key='data_source_multiselect',
+        help="Select one or more data sources to compare their models in the same plot"
     )
-    data_source = DATA_SOURCES[selected_source_name]
+    
+    # Update session state
+    st.session_state['selected_data_sources'] = selected_source_names
+    
+    # Create dictionary of selected data sources
+    selected_data_sources = {name: DATA_SOURCES[name] for name in selected_source_names}
+    
+    # Show domain selector for AWS API data source if it's selected
+    if any('AWS API' in name for name in selected_source_names) and st.session_state.get('aws_authenticated', False):
+        st.markdown("**ACCESS-CE Domain**")
+        current_domain = st.session_state.get('aws_domain', 'brisbane')
+        domain_options = ['brisbane', 'adelaide', 'sydney', 'darwin', 'canberra', 
+                         'hobart', 'melbourne', 'perth', 'nqld']
+        
+        new_domain = st.selectbox(
+            'Select Domain for ACCESS-CE',
+            options=domain_options,
+            index=domain_options.index(current_domain) if current_domain in domain_options else 0,
+            key='aws_domain_main',
+            help='Domain used for ACCESS-CE ensemble model'
+        )
+        
+        if new_domain != current_domain:
+            st.session_state['aws_domain'] = new_domain
+            st.session_state['aws_domain_changed'] = True
+            # Force re-initialization of data source with new domain
+            st.info(f"Domain changed to {new_domain}. Variables will update for ACCESS-CE.")
+            st.rerun()
     
     st.markdown("---")
     
@@ -248,14 +412,23 @@ with info_col:
     st.metric("Longitude", f"{lon:.4f}")
     st.metric("Forecast Type", forecast_type)
     st.markdown("---")
-    st.caption(f"Data Source: {data_source.name}")
+    # Show all selected data sources
+    if selected_data_sources:
+        st.caption(f"Data Sources: {', '.join(selected_data_sources.keys())}")
+    else:
+        st.warning("⚠️ No data sources selected. Please select at least one data source.")
 
 st.divider()
 
 # --- Render Appropriate View ---
-if forecast_type == 'Deterministic':
+if forecast_type == 'Metadata':
+    # Show metadata view regardless of data source selection
+    show_metadata_view(selected_data_sources or get_data_sources())
+elif not selected_data_sources:
+    st.error("❌ Please select at least one data source from the sidebar to continue.")
+elif forecast_type == 'Deterministic':
     render_deterministic_view(
-        data_source=data_source,
+        data_sources=selected_data_sources,
         lat=lat,
         lon=lon,
         site=selected_site,
@@ -268,7 +441,7 @@ if forecast_type == 'Deterministic':
     
 elif forecast_type == 'Probabilistic/Ensemble':
     render_ensemble_view(
-        data_source=data_source,
+        data_sources=selected_data_sources,
         lat=lat,
         lon=lon,
         site=selected_site,

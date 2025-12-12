@@ -47,3 +47,19 @@ class DataSource(ABC):
     def get_available_variables(self, data_type: str = 'hourly') -> List[str]:
         """Return list of available variables for this data source"""
         pass
+    
+    def get_model_specific_variables(self, model: str, forecast_type: str = 'deterministic', domain: str = None) -> List[str]:
+        """
+        Return list of variables available for a specific model.
+        Default implementation returns all variables (for backwards compatibility).
+        Override this for data sources with model-specific variable support.
+        
+        Args:
+            model: Model name
+            forecast_type: 'deterministic' or 'ensemble'
+            domain: Optional domain (for models like ACCESS-CE)
+        
+        Returns:
+            List of variable names available for this model
+        """
+        return self.get_available_variables()

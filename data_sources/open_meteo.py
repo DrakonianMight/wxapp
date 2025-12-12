@@ -46,6 +46,20 @@ class OpenMeteoDataSource(DataSource):
         else:  # daily
             df = om_extract.getDailyData(lat_list, lon_list, site_list, variables=variables, models=models)
         
+        # Standardize: om_extract returns time as index, but we need 'datetime' column
+        if not df.empty:
+            if isinstance(df.index, pd.DatetimeIndex):
+                df = df.reset_index()
+                # Rename the index column to 'datetime'
+                if 'time' in df.columns:
+                    df = df.rename(columns={'time': 'datetime'})
+                elif 'index' in df.columns:
+                    df = df.rename(columns={'index': 'datetime'})
+            
+            # Ensure datetime column exists and is properly typed
+            if 'datetime' in df.columns:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+        
         return df
     
     def get_ensemble_data(
@@ -76,6 +90,20 @@ class OpenMeteoDataSource(DataSource):
             else:
                 df = om_extract.getDailyData(lat_list, lon_list, site_list, variables=variables, models=models)
         
+        # Standardize: om_extract returns time as index, but we need 'datetime' column
+        if not df.empty:
+            if isinstance(df.index, pd.DatetimeIndex):
+                df = df.reset_index()
+                # Rename the index column to 'datetime'
+                if 'time' in df.columns:
+                    df = df.rename(columns={'time': 'datetime'})
+                elif 'index' in df.columns:
+                    df = df.rename(columns={'index': 'datetime'})
+            
+            # Ensure datetime column exists and is properly typed
+            if 'datetime' in df.columns:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+        
         return df
     
     def get_available_models(self, forecast_type: str = 'deterministic') -> List[str]:
@@ -92,3 +120,18 @@ class OpenMeteoDataSource(DataSource):
             return BASE_HOURLY_PARAMS
         else:
             return DAILY_PARAMS
+    
+    def get_model_specific_variables(self, model: str, forecast_type: str = 'deterministic', domain: str = None) -> List[str]:
+        """
+        Return list of variables available for a specific Open-Meteo model.
+        Open-Meteo supports all standard variables for all models.
+        
+        Args:
+            model: Model name
+            forecast_type: 'deterministic' or 'ensemble'
+            domain: Not used for Open-Meteo
+        
+        Returns:
+            List of all available variables (same as get_available_variables)
+        """
+        return self.get_available_variables('hourly')

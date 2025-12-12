@@ -25,13 +25,19 @@ DETERMINISTIC_MODEL_COLORS = {
     'bom_access_global': '#33FF57', 
     'gfs_global': '#AAAAAA', 
     'cma_grapes_global': '#8A2BE2', 
-    'ukmo_global_deterministic_10km': '#00FFFF'
+    'ukmo_global_deterministic_10km': '#00FFFF',
+    # AWS API models
+    'gso': '#FF6B35',
+    'access-g': '#4ECDC4'
 }
 
 ENSEMBLE_MODEL_COLORS = {
     'ecmwf_ifs_ensemble': '#FF8C42',
     'gfs_ensemble': '#B8B8B8',
-    'bom_access_global_ensemble': '#5FFF8C'
+    'bom_access_global_ensemble': '#5FFF8C',
+    # AWS API ensemble models
+    'access-ge': '#95E1D3',
+    'access-ce': '#F38181'
 }
 
 # Y-axis titles for variables

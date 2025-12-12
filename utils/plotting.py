@@ -6,10 +6,53 @@ from typing import Dict, List
 import pandas as pd
 from config import YAXIS_TITLES, DETERMINISTIC_MODEL_COLORS, ENSEMBLE_MODEL_COLORS
 
+# Fallback color palette for models not in the config
+FALLBACK_COLORS = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
+    '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5'
+]
+
 
 def get_yaxis_title(column: str) -> str:
     """Get Y-axis title for a variable"""
     return YAXIS_TITLES.get(column, column.replace('_', ' ').title())
+
+
+def get_model_color(model_name: str, color_map: Dict, used_colors: set = None) -> str:
+    """
+    Get color for a model with fallback to palette if not in map
+    
+    Args:
+        model_name: Name of the model
+        color_map: Dictionary mapping model names to colors
+        used_colors: Set of colors already used (to avoid duplicates)
+    
+    Returns:
+        Color string (hex code)
+    """
+    if used_colors is None:
+        used_colors = set()
+    
+    # First try exact match in color map
+    if model_name in color_map:
+        return color_map[model_name]
+    
+    # Try partial matches (in case of model name variations)
+    for key in color_map:
+        if key in model_name or model_name in key:
+            return color_map[key]
+    
+    # Use fallback palette, cycling through unused colors first
+    for color in FALLBACK_COLORS:
+        if color not in used_colors:
+            used_colors.add(color)
+            return color
+    
+    # If all colors used, cycle through again
+    idx = len(used_colors) % len(FALLBACK_COLORS)
+    return FALLBACK_COLORS[idx]
 
 
 def create_deterministic_plot(
@@ -42,20 +85,41 @@ def create_deterministic_plot(
     fig = go.Figure()
     y_axis_label_set = False
     
-    # Convert index to specified timezone if needed
+    # Prepare dataframe with datetime handling
     df_plot = df.copy()
-    try:
-        tz = pytz.timezone(timezone)
-        if isinstance(df_plot.index, pd.DatetimeIndex):
-            if df_plot.index.tz is None:
-                df_plot.index = df_plot.index.tz_localize('UTC').tz_convert(tz)
+    
+    # Ensure we have datetime data for x-axis
+    if 'datetime' in df_plot.columns:
+        x_data = df_plot['datetime']
+        # Convert to specified timezone if needed
+        try:
+            tz = pytz.timezone(timezone)
+            if pd.api.types.is_datetime64_any_dtype(x_data):
+                if x_data.dt.tz is None:
+                    x_data = x_data.dt.tz_localize('UTC').dt.tz_convert(tz)
+                else:
+                    x_data = x_data.dt.tz_convert(tz)
+        except Exception as e:
+            pass  # If conversion fails, use original timezone
+    elif isinstance(df_plot.index, pd.DatetimeIndex):
+        # Fallback to index if datetime column not present
+        x_data = df_plot.index
+        try:
+            tz = pytz.timezone(timezone)
+            if x_data.tz is None:
+                x_data = x_data.tz_localize('UTC').tz_convert(tz)
             else:
-                df_plot.index = df_plot.index.tz_convert(tz)
-    except Exception as e:
-        pass  # If conversion fails, use original timezone
+                x_data = x_data.tz_convert(tz)
+        except Exception as e:
+            pass
+    else:
+        raise ValueError("DataFrame must have either 'datetime' column or DatetimeIndex")
+    
+    # Track used colors to ensure variety
+    used_colors = set()
     
     for selected_column in selected_columns:
-        cols_to_plot = [col for col in df_plot.columns if selected_column in col]
+        cols_to_plot = [col for col in df_plot.columns if selected_column in col and col != 'datetime']
         
         if not y_axis_label_set:
             y_axis_label = get_yaxis_title(selected_column)
@@ -63,10 +127,10 @@ def create_deterministic_plot(
 
         for col in cols_to_plot:
             cleaned_col = col.replace(selected_column, '').strip('_')
-            color = color_map.get(cleaned_col, 'black')
+            color = get_model_color(cleaned_col, color_map, used_colors)
 
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=df_plot[col], 
                 mode='lines', 
                 name=f"{cleaned_col} ({all_variables_map[selected_column]['label']})", 
@@ -247,19 +311,40 @@ def create_ensemble_plot(
     
     fig = go.Figure()
     
-    # Convert index to specified timezone if needed
+    # Prepare dataframe with datetime handling
     df_plot = df.copy()
-    try:
-        tz = pytz.timezone(timezone)
-        if isinstance(df_plot.index, pd.DatetimeIndex):
-            if df_plot.index.tz is None:
-                # Localize to UTC first, then convert to target timezone
-                df_plot.index = df_plot.index.tz_localize('UTC').tz_convert(tz)
+    
+    # Ensure we have datetime data for x-axis
+    if 'datetime' in df_plot.columns:
+        x_data = df_plot['datetime']
+        # Convert to specified timezone if needed
+        try:
+            tz = pytz.timezone(timezone)
+            if pd.api.types.is_datetime64_any_dtype(x_data):
+                if x_data.dt.tz is None:
+                    x_data = x_data.dt.tz_localize('UTC').dt.tz_convert(tz)
+                else:
+                    x_data = x_data.dt.tz_convert(tz)
+        except Exception as e:
+            print(f"Warning: Could not convert forecast timezone: {e}")
+            pass  # If conversion fails, use original timezone
+    elif isinstance(df_plot.index, pd.DatetimeIndex):
+        # Fallback to index if datetime column not present
+        x_data = df_plot.index
+        try:
+            tz = pytz.timezone(timezone)
+            if x_data.tz is None:
+                x_data = x_data.tz_localize('UTC').tz_convert(tz)
             else:
-                df_plot.index = df_plot.index.tz_convert(tz)
-    except Exception as e:
-        print(f"Warning: Could not convert forecast timezone: {e}")
-        pass  # If conversion fails, use original timezone
+                x_data = x_data.tz_convert(tz)
+        except Exception as e:
+            print(f"Warning: Could not convert forecast timezone: {e}")
+            pass
+    else:
+        raise ValueError("DataFrame must have either 'datetime' column or DatetimeIndex")
+    
+    # Track used colors to ensure variety
+    used_colors = set()
     
     for model in models:
         # Find all columns for this model and variable
@@ -269,7 +354,7 @@ def create_ensemble_plot(
         if not model_cols:
             continue
             
-        color = color_map.get(model, 'gray')
+        color = get_model_color(model, color_map, used_colors)
         ensemble_data = df_plot[model_cols]
         
         if show_percentiles:
@@ -282,7 +367,7 @@ def create_ensemble_plot(
             
             # Add 10-90% band
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=p90,
                 mode='lines',
                 line=dict(width=0),
@@ -292,7 +377,7 @@ def create_ensemble_plot(
             ))
             
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=p10,
                 mode='lines',
                 line=dict(width=0),
@@ -304,7 +389,7 @@ def create_ensemble_plot(
             
             # Add 25-75% band
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=p75,
                 mode='lines',
                 line=dict(width=0),
@@ -314,7 +399,7 @@ def create_ensemble_plot(
             ))
             
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=p25,
                 mode='lines',
                 line=dict(width=0),
@@ -326,7 +411,7 @@ def create_ensemble_plot(
             
             # Median line
             fig.add_trace(go.Scatter(
-                x=df_plot.index, 
+                x=x_data, 
                 y=p50,
                 mode='lines',
                 name=f'{model} Median',
@@ -337,7 +422,7 @@ def create_ensemble_plot(
             # Show individual ensemble members as thin lines
             for i, col in enumerate(model_cols):
                 fig.add_trace(go.Scatter(
-                    x=df_plot.index, 
+                    x=x_data, 
                     y=df_plot[col],
                     mode='lines',
                     name=f'{model} Member {i+1}',
@@ -525,6 +610,15 @@ def create_exceedance_plot(
     # Define line styles for different thresholds
     line_styles = ['solid', 'dash', 'dot', 'dashdot']
     
+    # Ensure we have datetime data for x-axis
+    if 'datetime' in df.columns:
+        x_data = df['datetime']
+    elif isinstance(df.index, pd.DatetimeIndex):
+        x_data = df.index
+    else:
+        # Fallback to integer index if no datetime found
+        x_data = df.index
+    
     for threshold_idx, threshold in enumerate(thresholds):
         line_style = line_styles[threshold_idx % len(line_styles)]
         
@@ -535,7 +629,7 @@ def create_exceedance_plot(
                 color = color_map.get(model, 'gray')
                 
                 fig.add_trace(go.Scatter(
-                    x=df.index,
+                    x=x_data,
                     y=df[col_name],
                     mode='lines',
                     name=f'{model} > {threshold}',
@@ -602,10 +696,19 @@ def create_ensemble_spaghetti_plot(
     if not member_cols:
         return fig
     
+    # Ensure we have datetime data for x-axis
+    if 'datetime' in df.columns:
+        x_data = df['datetime']
+    elif isinstance(df.index, pd.DatetimeIndex):
+        x_data = df.index
+    else:
+        # Fallback to integer index if no datetime found
+        x_data = df.index
+    
     # Add each member as a thin line
     for i, col in enumerate(member_cols):
         fig.add_trace(go.Scatter(
-            x=df.index,
+            x=x_data,
             y=df[col],
             mode='lines',
             name=f'Member {i+1}',
@@ -619,7 +722,7 @@ def create_ensemble_spaghetti_plot(
     ensemble_mean = ensemble_data.mean(axis=1)
     
     fig.add_trace(go.Scatter(
-        x=df.index,
+        x=x_data,
         y=ensemble_mean,
         mode='lines',
         name='Ensemble Mean',

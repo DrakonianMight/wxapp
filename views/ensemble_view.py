@@ -1,32 +1,205 @@
 # ========================================
-# File: views/ensemble_view.py
-"""Ensemble/Probabilistic forecast view"""
+# File: views/ensemble_view_new.py
+"""Redesigned Ensemble/Probabilistic forecast view"""
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from typing import List, Dict
 from collections import OrderedDict
-from utils.plotting import create_ensemble_plot, create_exceedance_plot
-from utils.probability import calculate_exceedance_probability
+from utils.variable_categorizer import VariableCategorizer
 from config import ENSEMBLE_MODEL_COLORS
-import plotly.graph_objects as go
-import ms_extract
+import numpy as np
 
 def check_nearby_station(lat: float, lon: float, max_distance_km: float = 1.0):
     """Check if there's a meteostat station within max_distance_km"""
     try:
         from meteostat import Stations
-        # Convert km to meters for meteostat's radius parameter
         radius_meters = max_distance_km * 1000
         stations = Stations().nearby(lat, lon, radius=radius_meters).fetch(1)
         if not stations.empty:
             station = stations.iloc[0]
-            # Get distance from station data (in meters if available)
             distance = station.get('distance', 0) / 1000.0 if 'distance' in station else max_distance_km
             return True, station, distance
         return False, None, None
     except Exception as e:
-        st.warning(f"Could not check for nearby stations: {e}")
         return False, None, None
+
+def create_ensemble_members_plot(
+    data_dict: Dict[str, pd.DataFrame],
+    variable: str,
+    models: List[str],
+    timezone: str = 'UTC'
+) -> go.Figure:
+    """
+    Create a plot showing all individual ensemble members for selected models
+    
+    Args:
+        data_dict: {model_name: dataframe with ensemble members}
+        variable: Variable to plot
+        models: List of model names
+        timezone: Timezone for display
+    
+    Returns:
+        Plotly figure
+    """
+    fig = go.Figure()
+    
+    for model in models:
+        if model not in data_dict:
+            continue
+            
+        df = data_dict[model]
+        
+        # Get color for this model
+        color = ENSEMBLE_MODEL_COLORS.get(model, 'gray')
+        
+        # Find member columns for this variable
+        member_cols = [col for col in df.columns if col.startswith(f'{variable}_{model}_member_')]
+        
+        if not member_cols:
+            continue
+        
+        datetime_col = df['datetime'] if 'datetime' in df.columns else df.index
+        
+        # Plot each ensemble member
+        for i, member_col in enumerate(member_cols):
+            fig.add_trace(go.Scatter(
+                x=datetime_col,
+                y=df[member_col],
+                mode='lines',
+                name=f'{model} - Member {i+1}',
+                line=dict(color=color, width=0.5, opacity=0.3),
+                legendgroup=model,
+                showlegend=(i == 0),  # Only show first member in legend
+                hovertemplate=f'{model} Member {i+1}: %{{y:.2f}}<extra></extra>'
+            ))
+        
+        # Calculate and plot ensemble mean
+        member_values = df[member_cols].values
+        ensemble_mean = member_values.mean(axis=1)
+        
+        fig.add_trace(go.Scatter(
+            x=datetime_col,
+            y=ensemble_mean,
+            mode='lines',
+            name=f'{model} - Mean',
+            line=dict(color=color, width=2.5),
+            legendgroup=model,
+            hovertemplate=f'{model} Mean: %{{y:.2f}}<extra></extra>'
+        ))
+    
+    fig.update_layout(
+        title=f'Ensemble Forecast: {variable}',
+        xaxis_title='Date/Time',
+        yaxis_title=variable,
+        hovermode='x unified',
+        height=500,
+        showlegend=True
+    )
+    
+    return fig
+
+def calculate_exceedance_probability(
+    data_dict: Dict[str, pd.DataFrame],
+    variable: str,
+    threshold: float,
+    models: List[str]
+) -> pd.DataFrame:
+    """
+    Calculate probability of exceedance (POE) for a threshold
+    
+    Args:
+        data_dict: {model_name: dataframe with ensemble members}
+        variable: Variable to analyze
+        threshold: Threshold value
+        models: List of model names
+    
+    Returns:
+        DataFrame with POE for each model
+    """
+    poe_data = {}
+    
+    for model in models:
+        if model not in data_dict:
+            continue
+            
+        df = data_dict[model]
+        member_cols = [col for col in df.columns if col.startswith(f'{variable}_{model}_member_')]
+        
+        if not member_cols:
+            continue
+        
+        member_values = df[member_cols].values
+        # Calculate percentage of members exceeding threshold
+        poe = (member_values > threshold).sum(axis=1) / len(member_cols) * 100
+        
+        datetime_col = df['datetime'] if 'datetime' in df.columns else df.index
+        poe_data[model] = pd.DataFrame({
+            'datetime': datetime_col,
+            f'POE_{threshold}': poe
+        })
+    
+    return poe_data
+
+def create_poe_plot(
+    poe_data: Dict[str, Dict[float, pd.DataFrame]],
+    variable: str,
+    thresholds: List[float],
+    models: List[str]
+) -> go.Figure:
+    """
+    Create probability of exceedance plot
+    
+    Args:
+        poe_data: {model: {threshold: dataframe}}
+        variable: Variable name
+        thresholds: List of thresholds
+        models: List of model names
+    
+    Returns:
+        Plotly figure
+    """
+    fig = go.Figure()
+    
+    # Define line styles for different thresholds
+    line_styles = ['solid', 'dash', 'dot']
+    
+    for model in models:
+        if model not in poe_data:
+            continue
+        
+        color = ENSEMBLE_MODEL_COLORS.get(model, 'gray')
+        
+        for idx, threshold in enumerate(thresholds):
+            if threshold not in poe_data[model]:
+                continue
+            
+            df = poe_data[model][threshold]
+            
+            fig.add_trace(go.Scatter(
+                x=df['datetime'],
+                y=df[f'POE_{threshold}'],
+                mode='lines',
+                name=f'{model} - POE > {threshold}',
+                line=dict(
+                    color=color,
+                    width=2,
+                    dash=line_styles[idx % len(line_styles)]
+                ),
+                hovertemplate=f'{model} POE > {threshold}: %{{y:.1f}}%<extra></extra>'
+            ))
+    
+    fig.update_layout(
+        title=f'Probability of Exceedance (POE): {variable}',
+        xaxis_title='Date/Time',
+        yaxis_title='Probability (%)',
+        yaxis=dict(range=[0, 100]),
+        hovermode='x unified',
+        height=400,
+        showlegend=True
+    )
+    
+    return fig
 
 def render_ensemble_view(
     data_sources: Dict,
@@ -40,7 +213,7 @@ def render_ensemble_view(
     timezone: str = 'UTC'
 ):
     """
-    Render the ensemble/probabilistic forecast view with support for multiple data sources
+    Render the redesigned ensemble/probabilistic forecast view
     
     Args:
         data_sources: Dictionary of {source_name: DataSource instance}
@@ -50,63 +223,50 @@ def render_ensemble_view(
         timezone: Timezone for display
     """
     
+    # Removed large title - location info is shown under map
+    
     # Check if any selected source supports ensemble
     ensemble_sources = {name: ds for name, ds in data_sources.items() if ds.supports_ensemble}
     
     if not ensemble_sources:
-        st.warning("None of the selected data sources support ensemble forecasts. Please select a data source with ensemble support (e.g., Open-Meteo or AWS API).")
+        st.warning("⚠️ None of the selected data sources support ensemble forecasts. Please select a data source with ensemble support (e.g., Open-Meteo or AWS API).")
         return
     
-    # Collect variables from all ensemble-supporting data sources
+    # Collect available variables
     all_data_source_vars = []
-    data_source_var_map = {}  # Track which source provides which variables
+    data_source_var_map = {}
     
     for source_name, data_source in ensemble_sources.items():
         try:
             source_vars = data_source.get_available_variables('hourly')
             all_data_source_vars.extend(source_vars)
-            # Track source for each variable
             for var in source_vars:
                 if var not in data_source_var_map:
                     data_source_var_map[var] = []
                 data_source_var_map[var].append(source_name)
-        except Exception as e:
-            # If data source doesn't implement this or fails, continue
+        except Exception:
             pass
     
-    # Remove duplicates while preserving order
     data_source_vars = list(OrderedDict.fromkeys(all_data_source_vars))
-    
-    # Combine base, custom, and data source parameters
     all_params = base_hourly_params + custom_hourly_params + data_source_vars
     hourly_params = list(OrderedDict.fromkeys([p for p in all_params if p]))
     
-    # Build variables map with source information
+    # Build variables map
     all_variables_map = OrderedDict()
-    
     for var in hourly_params:
-        # Determine label based on source
         if var in data_source_vars and var not in base_hourly_params and var not in custom_hourly_params:
-            # Show which data sources provide this variable
             sources = data_source_var_map.get(var, [])
             if len(sources) == 1:
-                label = f'Hourly: {var} (from {sources[0]})'
+                label = f'{var} ({sources[0]})'
             else:
-                label = f'Hourly: {var} (from {len(sources)} sources)'
-        elif var in custom_hourly_params:
-            label = f'Hourly: {var} (Custom)'
+                label = f'{var} ({len(sources)} sources)'
         else:
-            label = f'Hourly: {var}'
-        all_variables_map[var] = {'label': label, 'type': 'hourly', 'is_obs_available': False}
-
-    for var in daily_params:
-        all_variables_map[var] = {'label': 'Daily: ' + var, 'type': 'daily', 'is_obs_available': False}
-
-    # Build model-to-variable and variable-to-model mappings
-    # For each variable, track which models from which sources provide it
-    variable_model_map = OrderedDict()  # {variable: [(source_name, data_source, model_name), ...]}
-    model_variable_map = OrderedDict()  # {model_key: (source_name, data_source, model, [variables])}
-    all_available_models = {}  # {model_key: (source_name, data_source, model)}
+            label = var
+        all_variables_map[var] = {'label': label, 'type': 'hourly'}
+    
+    # Build model-to-variable mapping
+    model_variable_map = OrderedDict()
+    all_available_models = {}
     
     for source_name, data_source in ensemble_sources.items():
         models = data_source.get_available_models('ensemble')
@@ -115,397 +275,158 @@ def render_ensemble_view(
             all_available_models[model_key] = (source_name, data_source, model)
             
             try:
-                # Get variables for this model
                 model_vars = data_source.get_model_specific_variables(model, 'ensemble')
                 model_variable_map[model_key] = (source_name, data_source, model, model_vars)
-                
-                for var in model_vars:
-                    if var not in variable_model_map:
-                        variable_model_map[var] = []
-                    variable_model_map[var].append((source_name, data_source, model))
             except Exception:
-                # If can't get model-specific vars, try general variables
                 try:
                     general_vars = data_source.get_available_variables('hourly')
                     model_variable_map[model_key] = (source_name, data_source, model, general_vars)
-                    for var in general_vars:
-                        if var not in variable_model_map:
-                            variable_model_map[var] = []
-                        variable_model_map[var].append((source_name, data_source, model))
                 except Exception:
                     model_variable_map[model_key] = (source_name, data_source, model, [])
     
-    # Create two columns for selections
-    col1, col2 = st.columns(2)
+    # =========================================================================
+    # SECTION 1: MODEL & PARAMETER SELECTION
+    # =========================================================================
     
-    with col1:
-        # Variable selection (multi-select)
-        variable_options = [v for v in all_variables_map.keys() if v in variable_model_map]
-        
-        selected_variables = st.multiselect(
-            'Select Weather Variables',
-            options=variable_options,
-            default=[],
-            format_func=lambda x: all_variables_map[x]['label'],
-            key='ens_variable_multiselect',
-            help="Select multiple variables to plot from the selected models."
-        )
-    
-    with col2:
-        # Model selection with variable info
-        def format_model_display(model_key):
-            source_name, _, model, variables = model_variable_map[model_key]
-            var_count = len(variables)
-            return f"{model} ({source_name}) - {var_count} vars"
-        
-        selected_model_keys = st.multiselect(
-            'Select Ensemble Models',
-            options=list(all_available_models.keys()),
-            default=[],
-            format_func=format_model_display,
-            key='ens_model_multiselect',
-            help=f"{len(all_available_models)} ensemble model(s) available. Each shows variable count."
-        )
-    
-    # Show detailed model information with variables
-    if selected_model_keys or selected_variables:
-        with st.expander(f"📋 Variable-Model Compatibility Matrix", expanded=True):
-            if selected_model_keys and selected_variables:
-                # Show which selected models support which selected variables
-                st.markdown("**Selected Variables & Models:**")
-                
-                # Create a compatibility matrix
-                for var in selected_variables:
-                    st.markdown(f"**{var}**")
-                    available_in = []
-                    not_available_in = []
-                    
-                    for model_key in selected_model_keys:
-                        source_name, _, model, model_vars = model_variable_map[model_key]
-                        if var in model_vars:
-                            available_in.append(f"{model} ({source_name})")
-                        else:
-                            not_available_in.append(f"{model} ({source_name})")
-                    
-                    if available_in:
-                        st.success(f"✓ Available in: {', '.join(available_in)}")
-                    if not_available_in:
-                        st.warning(f"✗ NOT available in: {', '.join(not_available_in)}")
-                    st.markdown("---")
+    # Use the controls column from app.py if available
+    if 'controls_column_ref' in st.session_state:
+        with st.session_state['controls_column_ref']:
+            st.markdown("### 🎯 Models & Parameters")
             
-            elif selected_model_keys:
-                # Show what variables each selected model has
-                st.markdown("**Variables by Selected Model:**")
-                for model_key in selected_model_keys:
-                    source_name, _, model, variables = model_variable_map[model_key]
-                    st.markdown(f"**{model}** ({source_name}) - {len(variables)} variables")
-                    if variables:
-                        # Show first 10 variables
-                        display_vars = variables[:10]
-                        st.caption(f"  {', '.join(display_vars)}")
-                        if len(variables) > 10:
-                            st.caption(f"  ... and {len(variables) - 10} more")
-                    else:
-                        st.caption("  No variables available")
-                    st.markdown("---")
+            # Format model display
+            def format_model_display(model_key):
+                source_name, _, model, variables = model_variable_map[model_key]
+                var_count = len(variables)
+                return f"{model} - {var_count} vars"
             
-            elif selected_variables:
-                # Show which models support each selected variable
-                st.markdown("**Models Supporting Selected Variables:**")
-                for var in selected_variables:
-                    st.markdown(f"**{var}**")
-                    if var in variable_model_map:
-                        models_for_var = variable_model_map[var]
-                        by_source = {}
-                        for source_name, _, model in models_for_var:
-                            if source_name not in by_source:
-                                by_source[source_name] = []
-                            by_source[source_name].append(model)
-                        
-                        for source_name, models in by_source.items():
-                            unique_models = list(OrderedDict.fromkeys(models))
-                            st.caption(f"  {source_name}: {', '.join(unique_models)}")
-                    st.markdown("---")
-    
-    # Display options
-    st.markdown("### Display Options")
-    display_col1, display_col2, display_col3 = st.columns(3)
-    
-    with display_col1:
-        show_percentiles = st.checkbox("Show Percentile Bands", value=True, key='show_percentiles')
-    
-    with display_col2:
-        show_members = st.checkbox("Show Individual Members", value=False, key='show_members')
-    
-    with display_col3:
-        combine_plots = st.checkbox("Combine All Variables in One Plot", value=False, key='combine_plots',
-                                   help="Overlay all selected variables on a single plot instead of separate plots per variable")
-    
-    # Threshold analysis section
-    st.markdown("### Threshold Analysis")
-    enable_threshold = st.checkbox("Enable Exceedance Probability Analysis", value=False, key='enable_threshold')
-    
-    thresholds = []
-    if enable_threshold:
-        threshold_col1, threshold_col2, threshold_col3 = st.columns(3)
-        
-        with threshold_col1:
-            threshold_1 = st.number_input(
-                "Threshold 1",
-                value=20.0,
-                step=0.1,
-                key='threshold_1'
+            selected_model_keys = st.multiselect(
+                'Models',
+                options=list(all_available_models.keys()),
+                default=[],
+                format_func=format_model_display,
+                key='ens_model_select',
+                help="Select ensemble models",
+                label_visibility="collapsed"
             )
-            if st.checkbox("Use Threshold 1", value=True, key='use_t1'):
-                thresholds.append(threshold_1)
-        
-        with threshold_col2:
-            threshold_2 = st.number_input(
-                "Threshold 2",
-                value=25.0,
-                step=0.1,
-                key='threshold_2'
+            
+            st.markdown("**Parameters**")
+            
+            # Initialize categorizer
+            categorizer = VariableCategorizer()
+            variable_options = [v for v in all_variables_map.keys()]
+            categorized_vars = categorizer.group_variables_by_category(variable_options)
+            
+            # Category filter
+            category_names = [categorizer.CATEGORIES[cat]['name'] for cat in categorized_vars.keys()]
+            selected_category = st.selectbox(
+                "Category",
+                options=["All Categories"] + category_names,
+                key='ens_category_filter',
+                label_visibility="collapsed"
             )
-            if st.checkbox("Use Threshold 2", value=False, key='use_t2'):
-                thresholds.append(threshold_2)
-        
-        with threshold_col3:
-            threshold_3 = st.number_input(
-                "Threshold 3",
-                value=30.0,
-                step=0.1,
-                key='threshold_3'
+            
+            # Filter variables
+            if selected_category == "All Categories":
+                filtered_variables = variable_options
+            else:
+                for cat_key, cat_info in categorizer.CATEGORIES.items():
+                    if cat_info['name'] == selected_category:
+                        filtered_variables = categorized_vars.get(cat_key, [])
+                        break
+            
+            # Variable selection
+            selected_variables = st.multiselect(
+                'Params',
+                options=filtered_variables,
+                default=[],
+                format_func=lambda x: all_variables_map[x]['label'],
+                key='ens_var_select',
+                help="Select parameters",
+                label_visibility="collapsed"
             )
-            if st.checkbox("Use Threshold 3", value=False, key='use_t3'):
-                thresholds.append(threshold_3)
-    
-    if not selected_variables:
-        st.info("Please select at least one weather variable to plot.")
-        return
+    else:
+        # Fallback to original two-column layout if controls column not available
+        st.markdown("## 🎯 Select Models and Parameters")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Models")
+            
+            # Format model display
+            def format_model_display(model_key):
+                source_name, _, model, variables = model_variable_map[model_key]
+                var_count = len(variables)
+                return f"{model} ({source_name}) - {var_count} vars"
+            
+            selected_model_keys = st.multiselect(
+                'Select Ensemble Models',
+                options=list(all_available_models.keys()),
+                default=[],
+                format_func=format_model_display,
+                key='ens_model_select',
+                help="Select one or more ensemble models to visualize"
+            )
+        
+        with col2:
+            st.markdown("### Parameters")
+            
+            # Initialize categorizer
+            categorizer = VariableCategorizer()
+            variable_options = [v for v in all_variables_map.keys()]
+            categorized_vars = categorizer.group_variables_by_category(variable_options)
+            
+            # Category filter
+            category_names = [categorizer.CATEGORIES[cat]['name'] for cat in categorized_vars.keys()]
+            selected_category = st.selectbox(
+                "Filter by Category",
+                options=["All Categories"] + category_names,
+                key='ens_category_filter'
+            )
+            
+            # Filter variables
+            if selected_category == "All Categories":
+                filtered_variables = variable_options
+            else:
+                for cat_key, cat_info in categorizer.CATEGORIES.items():
+                    if cat_info['name'] == selected_category:
+                        filtered_variables = categorized_vars.get(cat_key, [])
+                        break
+            
+            # Variable selection
+            selected_variables = st.multiselect(
+                'Select Parameters',
+                options=filtered_variables,
+                default=[],
+                format_func=lambda x: all_variables_map[x]['label'],
+                key='ens_var_select',
+                help="Select one or more parameters to plot (can mix different parameters on same plot)"
+            )
     
     if not selected_model_keys:
-        st.info("Please select at least one ensemble model to plot.")
+        st.info("👆 Please select at least one ensemble model to continue.")
         return
     
-    # Check for nearby observation station once
-    has_nearby_station, station_info, distance = check_nearby_station(lat, lon, max_distance_km=obs_distance_km)
-    if has_nearby_station:
-        st.info(f"📍 Observation station '{station_info['name']}' found {distance:.2f} km away")
+    if not selected_variables:
+        st.info("👆 Please select at least one parameter to continue.")
+        return
     
-    # COMBINED MODE: Fetch all variables and combine into one plot
-    if combine_plots:
-        all_variable_data = {}  # {variable: (df_forecast, df_obs, selected_model_names, data_type)}
-        
-        with st.spinner(f"Fetching ensemble forecasts for {len(selected_variables)} variable(s)..."):
-            for selected_variable in selected_variables:
-                selected_data_type = all_variables_map[selected_variable]['type']
-                
-                # Get only the SELECTED models that provide this variable
-                models_for_variable = []
-                for model_key in selected_model_keys:
-                    source_name, data_source, model, model_vars = model_variable_map[model_key]
-                    if selected_variable in model_vars:
-                        models_for_variable.append((source_name, data_source, model))
-                
-                if not models_for_variable:
-                    st.warning(f"⚠️ None of the selected models provide '{selected_variable}'. Skipping.")
-                    continue
-                
-                # Fetch data from each model/source combination for this variable
-                all_forecast_dfs = []
-                
-                # Group models by source
-                models_by_source = {}
-                for source_name, data_source, model in models_for_variable:
-                    if source_name not in models_by_source:
-                        models_by_source[source_name] = {
-                            'data_source': data_source,
-                            'models': []
-                        }
-                    if model not in models_by_source[source_name]['models']:
-                        models_by_source[source_name]['models'].append(model)
-                
-                # Fetch from each data source
-                for source_name, source_info in models_by_source.items():
-                    data_source = source_info['data_source']
-                    models = source_info['models']
-                    
-                    try:
-                        df = data_source.get_ensemble_data(
-                            lat, lon, site, [selected_variable], selected_data_type, models
-                        )
-                        if not df.empty:
-                            all_forecast_dfs.append(df)
-                    except Exception as e:
-                        st.warning(f"Failed to fetch ensemble data from {source_name} for '{selected_variable}': {str(e)}")
-                
-                # Combine all forecast dataframes for this variable
-                if not all_forecast_dfs:
-                    st.warning(f"No ensemble forecast data retrieved for '{selected_variable}'")
-                    continue
-                
-                df_forecast = pd.concat(all_forecast_dfs, ignore_index=True)
-                
-                if df_forecast.empty:
-                    st.warning(f"No ensemble forecast data retrieved for '{selected_variable}'")
-                    continue
-                
-                # Fetch observation data
-                df_obs = None
-                if has_nearby_station and selected_data_type == 'hourly':
-                    from data_sources.meteostat_obs import MeteostatObsDataSource
-                    obs_source = MeteostatObsDataSource()
-                    
-                    @st.cache_data(ttl=3600)
-                    def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days, timezone):
-                        return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days, timezone)
-                    
-                    df_obs = get_cached_obs_data(
-                        lat, lon, site, [selected_variable], selected_data_type, previous_days=2, timezone=timezone
-                    )
-                
-                # Extract list of model names for this variable
-                selected_model_names = list(OrderedDict.fromkeys([model for _, _, model in models_for_variable]))
-                
-                all_variable_data[selected_variable] = (df_forecast, df_obs, selected_model_names, selected_data_type)
-        
-        if not all_variable_data:
-            st.warning("No data retrieved for any selected variable.")
-            return
-        
-        # Create combined plot
-        st.subheader(f'Combined Ensemble Forecast ({site})')
-        st.caption(f"Showing {len(all_variable_data)} variable(s) with selected models")
-        
-        # Create a combined figure
-        fig = go.Figure()
-        
-        # Track y-axes for multiple variables with different units
-        yaxis_count = 0
-        variable_colors = {}
-        
-        for idx, (variable, (df_forecast, df_obs, model_names, data_type)) in enumerate(all_variable_data.items()):
-            yaxis_count += 1
-            
-            # Add traces for this variable
-            for model in model_names:
-                # Get ensemble members for this model and variable
-                # Member columns are named: {variable}_{model}_member_XX
-                member_cols = [col for col in df_forecast.columns 
-                             if col.startswith(f'{variable}_{model}_member_')]
-                
-                if not member_cols:
-                    continue
-                
-                if show_percentiles and len(member_cols) > 0:
-                    # Calculate percentiles across member columns
-                    member_values = df_forecast[member_cols].values
-                    
-                    p10 = pd.Series(member_values.min(axis=1), index=df_forecast.index)
-                    p25 = pd.Series(pd.DataFrame(member_values).quantile(0.25, axis=1).values, index=df_forecast.index)
-                    p50 = pd.Series(pd.DataFrame(member_values).quantile(0.50, axis=1).values, index=df_forecast.index)
-                    p75 = pd.Series(pd.DataFrame(member_values).quantile(0.75, axis=1).values, index=df_forecast.index)
-                    p90 = pd.Series(member_values.max(axis=1), index=df_forecast.index)
-                    
-                    datetime_col = df_forecast['datetime'] if 'datetime' in df_forecast.columns else df_forecast.index
-                    
-                    # Get color for this model
-                    color = ENSEMBLE_MODEL_COLORS.get(model, f'hsl({idx * 60 % 360}, 70%, 50%)')
-                    
-                    # Add median line
-                    fig.add_trace(go.Scatter(
-                        x=datetime_col,
-                        y=p50,
-                        mode='lines',
-                        name=f'{variable} - {model} (median)',
-                        line=dict(color=color, width=2),
-                        yaxis=f'y{yaxis_count}' if yaxis_count > 1 else 'y',
-                        legendgroup=variable
-                    ))
-                    
-                    # Add percentile bands
-                    fig.add_trace(go.Scatter(
-                        x=datetime_col,
-                        y=p75,
-                        mode='lines',
-                        line=dict(width=0),
-                        showlegend=False,
-                        yaxis=f'y{yaxis_count}' if yaxis_count > 1 else 'y',
-                        legendgroup=variable
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=datetime_col,
-                        y=p25,
-                        mode='lines',
-                        fill='tonexty',
-                        fillcolor=color.replace(')', ', 0.3)').replace('rgb', 'rgba') if 'rgb' in color else f'rgba(100, 100, 100, 0.3)',
-                        line=dict(width=0),
-                        name=f'{variable} - {model} (25-75%)',
-                        yaxis=f'y{yaxis_count}' if yaxis_count > 1 else 'y',
-                        legendgroup=variable
-                    ))
-            
-            # Add observations if available
-            if df_obs is not None and not df_obs.empty and variable in df_obs.columns:
-                datetime_col = df_obs['datetime'] if 'datetime' in df_obs.columns else df_obs.index
-                fig.add_trace(go.Scatter(
-                    x=datetime_col,
-                    y=df_obs[variable],
-                    mode='markers+lines',
-                    name=f'{variable} - Observations',
-                    marker=dict(size=4, color='black'),
-                    line=dict(color='black', width=1, dash='dot'),
-                    yaxis=f'y{yaxis_count}' if yaxis_count > 1 else 'y',
-                    legendgroup=variable
-                ))
-        
-        # Update layout for multiple y-axes
-        layout_updates = {
-            'title': f'Combined Ensemble Forecast - {site}',
-            'xaxis': {'title': 'Date/Time'},
-            'hovermode': 'x unified',
-            'height': 600
-        }
-        
-        # Configure y-axes
-        if yaxis_count == 1:
-            layout_updates['yaxis'] = {'title': list(all_variable_data.keys())[0]}
-        else:
-            # Multiple y-axes - first on left, others on right
-            for idx, variable in enumerate(all_variable_data.keys()):
-                axis_num = idx + 1
-                if axis_num == 1:
-                    layout_updates['yaxis'] = {'title': variable, 'side': 'left'}
-                else:
-                    y_axis_key = f'yaxis{axis_num}'
-                    layout_updates[y_axis_key] = {
-                        'title': variable,
-                        'overlaying': 'y',
-                        'side': 'right' if idx % 2 == 1 else 'left',
-                        'position': 1 - (idx - 1) * 0.05 if idx % 2 == 1 else (idx - 1) * 0.05
-                    }
-        
-        fig.update_layout(**layout_updates)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Build caption
-        all_sources = set()
-        all_models = set()
-        for variable, (df_forecast, df_obs, model_names, data_type) in all_variable_data.items():
-            all_models.update(model_names)
-        
-        caption = f"Variables: **{', '.join(all_variable_data.keys())}** | Models: **{', '.join(all_models)}**"
-        if has_nearby_station:
-            caption += f" | Observations: **Meteostat ({station_info['name']})**"
-        st.caption(caption)
+    # =========================================================================
+    # SECTION 2: FETCH DATA & CREATE MAIN PLOT
+    # =========================================================================
     
-    # SEPARATE MODE: Create individual plots for each variable
-    else:
+    st.markdown("## 📈 Ensemble Members")
+    st.caption("Showing all individual ensemble members for selected models")
+    
+    # Fetch data for all selected variables and models
+    ensemble_data = {}  # {variable: {model: dataframe}}
+    
+    with st.spinner("Fetching ensemble data..."):
         for selected_variable in selected_variables:
+            ensemble_data[selected_variable] = {}
             selected_data_type = all_variables_map[selected_variable]['type']
             
-            # Get only the SELECTED models that provide this variable
+            # Get models that provide this variable
             models_for_variable = []
             for model_key in selected_model_keys:
                 source_name, data_source, model, model_vars = model_variable_map[model_key]
@@ -513,114 +434,196 @@ def render_ensemble_view(
                     models_for_variable.append((source_name, data_source, model))
             
             if not models_for_variable:
-                st.warning(f"⚠️ None of the selected models provide '{selected_variable}'. Skipping.")
+                st.warning(f"⚠️ None of the selected models provide '{selected_variable}'")
                 continue
             
-            # Fetch data from each model/source combination for this variable
-            all_forecast_dfs = []
-            
-            with st.spinner(f"Fetching ensemble forecasts for {selected_variable}..."):
-                # Group models by source
-                models_by_source = {}
-                for source_name, data_source, model in models_for_variable:
-                    if source_name not in models_by_source:
-                        models_by_source[source_name] = {
-                            'data_source': data_source,
-                            'models': []
-                        }
-                    if model not in models_by_source[source_name]['models']:
-                        models_by_source[source_name]['models'].append(model)
-                
-                # Fetch from each data source
-                for source_name, source_info in models_by_source.items():
-                    data_source = source_info['data_source']
-                    models = source_info['models']
-                    
-                    try:
-                        df = data_source.get_ensemble_data(
-                            lat, lon, site, [selected_variable], selected_data_type, models
-                        )
-                        if not df.empty:
-                            all_forecast_dfs.append(df)
-                    except Exception as e:
-                        st.warning(f"Failed to fetch ensemble data from {source_name} for '{selected_variable}': {str(e)}")
-            
-            # Combine all forecast dataframes for this variable
-            if not all_forecast_dfs:
-                st.warning(f"No ensemble forecast data retrieved for '{selected_variable}'")
-                continue
-            
-            df_forecast = pd.concat(all_forecast_dfs, ignore_index=True)
-            
-            if df_forecast.empty:
-                st.warning(f"No ensemble forecast data retrieved for '{selected_variable}'")
-                continue
-            
-            # Fetch observation data
-            df_obs = None
-            if has_nearby_station and selected_data_type == 'hourly':
-                from data_sources.meteostat_obs import MeteostatObsDataSource
-                obs_source = MeteostatObsDataSource()
-                
-                @st.cache_data(ttl=3600)
-                def get_cached_obs_data(lat, lon, site, variables, data_type, previous_days, timezone):
-                    return obs_source.get_deterministic_data(lat, lon, site, variables, data_type, [], previous_days, timezone)
-                
-                with st.spinner("Fetching observation data..."):
-                    df_obs = get_cached_obs_data(
-                        lat, lon, site, [selected_variable], selected_data_type, previous_days=2, timezone=timezone
+            # Fetch from each model
+            for source_name, data_source, model in models_for_variable:
+                try:
+                    df = data_source.get_ensemble_data(
+                        lat, lon, site, [selected_variable], selected_data_type, [model]
                     )
+                    if not df.empty:
+                        ensemble_data[selected_variable][model] = df
+                except Exception as e:
+                    st.warning(f"Failed to fetch data from {model}: {str(e)}")
+    
+    # Create single plot with ALL variables and models
+    if ensemble_data:
+        fig = go.Figure()
+        
+        # Track which models/variables we've added
+        all_models_shown = set()
+        
+        # Create a color palette for models not in config
+        default_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+                         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        model_color_map = {}
+        color_index = 0
+        
+        for variable in selected_variables:
+            if variable not in ensemble_data or not ensemble_data[variable]:
+                continue
             
-            # Extract list of model names for this variable
-            selected_model_names = list(OrderedDict.fromkeys([model for _, _, model in models_for_variable]))
-            
-            # Create ensemble plot
-            st.subheader(f'Ensemble Forecast: {selected_variable} ({site})')
-            fig = create_ensemble_plot(
-                df_forecast,
-                selected_variable,
-                selected_model_names,
-                ENSEMBLE_MODEL_COLORS,
-                show_percentiles=show_percentiles,
-                show_members=show_members,
-                df_obs=df_obs,
-                timezone=timezone,
-                thresholds=thresholds if enable_threshold else None
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Create exceedance probability plot if enabled
-            if enable_threshold and thresholds:
-                st.subheader(f'Exceedance Probability: {selected_variable}')
+            for model in ensemble_data[variable].keys():
+                all_models_shown.add(model)
+                df = ensemble_data[variable][model]
                 
-                # Calculate exceedance probabilities
-                df_exceedance = pd.DataFrame()
-                if 'datetime' in df_forecast.columns:
-                    df_exceedance = pd.DataFrame({'datetime': df_forecast['datetime'].unique()})
-                    df_exceedance = df_exceedance.set_index('datetime')
+                # Get or assign color for this model
+                if model in ENSEMBLE_MODEL_COLORS:
+                    color = ENSEMBLE_MODEL_COLORS[model]
+                elif model not in model_color_map:
+                    # Assign a new color from the palette
+                    model_color_map[model] = default_colors[color_index % len(default_colors)]
+                    color = model_color_map[model]
+                    color_index += 1
+                else:
+                    color = model_color_map[model]
                 
-                for threshold in thresholds:
-                    df_exceed = calculate_exceedance_probability(
-                        df_forecast, selected_variable, threshold, selected_model_names
-                    )
-                    df_exceedance = pd.concat([df_exceedance, df_exceed], axis=1)
+                # Find member columns for this variable
+                member_cols = [col for col in df.columns if col.startswith(f'{variable}_{model}_member_')]
                 
-                fig_exceed = create_exceedance_plot(
-                    df_exceedance,
-                    selected_variable,
-                    thresholds,
-                    selected_model_names,
-                    ENSEMBLE_MODEL_COLORS
+                if not member_cols:
+                    continue
+                
+                datetime_col = df['datetime'] if 'datetime' in df.columns else df.index
+                
+                # Plot each ensemble member
+                for i, member_col in enumerate(member_cols):
+                    fig.add_trace(go.Scatter(
+                        x=datetime_col,
+                        y=df[member_col],
+                        mode='lines',
+                        name=f'{model} - {variable} - Member {i+1}',
+                        line=dict(color=color, width=0.5),
+                        opacity=0.3,
+                        legendgroup=f'{model}_{variable}',
+                        showlegend=(i == 0),  # Only show first member in legend
+                        hovertemplate=f'{model} - {variable} Member {i+1}: %{{y:.2f}}<extra></extra>'
+                    ))
+                
+                # Calculate and plot ensemble mean
+                member_values = df[member_cols].values
+                ensemble_mean = member_values.mean(axis=1)
+                
+                fig.add_trace(go.Scatter(
+                    x=datetime_col,
+                    y=ensemble_mean,
+                    mode='lines',
+                    name=f'{model} - {variable} - Mean',
+                    line=dict(color=color, width=2.5),
+                    legendgroup=f'{model}_{variable}',
+                    hovertemplate=f'{model} - {variable} Mean: %{{y:.2f}}<extra></extra>'
+                ))
+        
+        # Simple layout with single y-axis
+        fig.update_layout(
+            title='Ensemble Forecast - All Selected Variables',
+            xaxis_title='Date/Time',
+            yaxis_title='Value',
+            hovermode='x unified',
+            height=500,
+            showlegend=True
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show info about the data
+        models_list = sorted(list(all_models_shown))
+        variables_list = [v for v in selected_variables if v in ensemble_data]
+        st.caption(f"**Variables**: {', '.join(variables_list)} | **Models**: {', '.join(models_list)}")
+    else:
+        st.warning("No data available for selected variables and models.")
+    
+    # =========================================================================
+    # SECTION 3: PROBABILITY OF EXCEEDANCE (POE) ANALYSIS
+    # =========================================================================
+    
+    st.markdown("## 📊 Probability of Exceedance Analysis")
+    
+    enable_poe = st.checkbox(
+        "Enable POE Analysis",
+        value=False,
+        key='enable_poe',
+        help="Calculate probability that values will exceed specified thresholds"
+    )
+    
+    if enable_poe:
+        st.markdown("### Define Thresholds")
+        st.caption("Add up to 3 threshold values for POE calculation")
+        
+        threshold_col1, threshold_col2, threshold_col3 = st.columns(3)
+        
+        thresholds = []
+        
+        with threshold_col1:
+            use_t1 = st.checkbox("Threshold 1", value=True, key='use_threshold_1')
+            if use_t1:
+                t1 = st.number_input(
+                    "Value",
+                    value=20.0,
+                    step=0.5,
+                    key='threshold_1_value'
                 )
-                st.plotly_chart(fig_exceed, use_container_width=True)
-                
-                st.caption(f"Showing probability (%) that {selected_variable} exceeds the specified thresholds")
+                thresholds.append(t1)
+        
+        with threshold_col2:
+            use_t2 = st.checkbox("Threshold 2", value=False, key='use_threshold_2')
+            if use_t2:
+                t2 = st.number_input(
+                    "Value",
+                    value=25.0,
+                    step=0.5,
+                    key='threshold_2_value'
+                )
+                thresholds.append(t2)
+        
+        with threshold_col3:
+            use_t3 = st.checkbox("Threshold 3", value=False, key='use_threshold_3')
+            if use_t3:
+                t3 = st.number_input(
+                    "Value",
+                    value=30.0,
+                    step=0.5,
+                    key='threshold_3_value'
+                )
+                thresholds.append(t3)
+        
+        if thresholds:
+            st.markdown("### POE Results")
             
-            # Build caption showing all data sources used for this variable
-            source_names = list(models_by_source.keys())
-            caption = f"Data type: **{selected_data_type.capitalize()}** | Sources: **{', '.join(source_names)}** | Models: **{', '.join(selected_model_names)}**"
-            if df_obs is not None and not df_obs.empty:
-                caption += f" | Observations: **Meteostat ({station_info['name']})**"
-            st.caption(caption)
-            st.markdown("---")
-
+            # Calculate POE for each variable
+            for variable in selected_variables:
+                if variable not in ensemble_data or not ensemble_data[variable]:
+                    continue
+                
+                poe_data = {}  # {model: {threshold: dataframe}}
+                
+                with st.spinner(f"Calculating POE for {variable}..."):
+                    for model in ensemble_data[variable].keys():
+                        poe_data[model] = {}
+                        for threshold in thresholds:
+                            poe_results = calculate_exceedance_probability(
+                                {model: ensemble_data[variable][model]},
+                                variable,
+                                threshold,
+                                [model]
+                            )
+                            if model in poe_results:
+                                poe_data[model][threshold] = poe_results[model]
+                
+                # Create POE plot
+                fig_poe = create_poe_plot(
+                    poe_data,
+                    variable,
+                    thresholds,
+                    list(ensemble_data[variable].keys())
+                )
+                
+                st.plotly_chart(fig_poe, use_container_width=True)
+                
+                # Show threshold info
+                threshold_str = ', '.join([str(t) for t in thresholds])
+                st.caption(f"**{variable}** - Thresholds: {threshold_str}")
+        else:
+            st.info("👆 Enable at least one threshold to see POE analysis")

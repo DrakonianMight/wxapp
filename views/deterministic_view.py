@@ -6,6 +6,7 @@ import pandas as pd
 from typing import List, Dict
 from collections import OrderedDict
 from utils.plotting import create_deterministic_plot
+from utils.variable_categorizer import VariableCategorizer
 from config import DETERMINISTIC_MODEL_COLORS
 import ms_extract
 
@@ -102,35 +103,163 @@ def render_deterministic_view(
             model_key = f"{source_name}::{model}"
             all_available_models[model_key] = (source_name, data_source, model)
     
-    # Simple model selection
-    def format_model_display(model_key):
-        source_name, _, model = all_available_models[model_key]
-        return f"{model} ({source_name})"
-    
-    selected_model_keys = st.multiselect(
-        'Select Models',
-        options=list(all_available_models.keys()),
-        default=[], 
-        key='det_model_select',
-        format_func=format_model_display
-    )
-    
-    if not selected_model_keys:
-        st.info("Please select at least one model to continue.")
-        return
-    
-    # Simple variable selection - show all variables
-    selected_variables = st.multiselect(
-        'Select Variables',
-        options=list(all_variables_map.keys()),
-        format_func=lambda x: all_variables_map[x]['label'],
-        default=[],
-        key='det_var_select'
-    )
-    
-    if not selected_variables:
-        st.info("Please select at least one variable to continue.")
-        return
+    # Use the controls column from app.py if available
+    if 'controls_column_ref' in st.session_state:
+        with st.session_state['controls_column_ref']:
+            st.markdown("### 🎯 Models & Variables")
+            
+            # Simple model selection
+            def format_model_display(model_key):
+                source_name, _, model = all_available_models[model_key]
+                return f"{model}"
+            
+            selected_model_keys = st.multiselect(
+                'Models',
+                options=list(all_available_models.keys()),
+                default=[], 
+                key='det_model_select',
+                format_func=format_model_display,
+                label_visibility="collapsed"
+            )
+            
+            if not selected_model_keys:
+                st.info("👆 Select models")
+                return
+            
+            st.markdown("**Variables**")
+            
+            # Initialize categorizer for automatic variable grouping
+            categorizer = VariableCategorizer()
+            
+            # Get all available variables
+            variable_options = list(all_variables_map.keys())
+            
+            # Group variables by category
+            categorized_vars = categorizer.group_variables_by_category(variable_options)
+            
+            # Category filter
+            category_names = [categorizer.CATEGORIES[cat]['name'] for cat in categorized_vars.keys()]
+            selected_category = st.selectbox(
+                "Category",
+                options=["All Categories"] + category_names,
+                key='det_category_filter',
+                label_visibility="collapsed"
+            )
+            
+            # Filter variables based on selected category
+            if selected_category == "All Categories":
+                filtered_variables = variable_options
+            else:
+                # Find which category key this is
+                for cat_key, cat_info in categorizer.CATEGORIES.items():
+                    if cat_info['name'] == selected_category:
+                        filtered_variables = categorized_vars.get(cat_key, [])
+                        break
+            
+            # Simple variable selection with enhanced labels
+            def format_variable_label(var):
+                base_label = all_variables_map[var]['label']
+                
+                # Determine sources that have this variable
+                sources_with_var = []
+                for source_name, data_source in data_sources.items():
+                    # Check if variable is in this source
+                    if var in data_source_var_map and source_name in data_source_var_map[var]:
+                        sources_with_var.append(source_name)
+                
+                # Add source indicator
+                if len(sources_with_var) > 1:
+                    return f"🔄 {base_label}"
+                else:
+                    return base_label
+            
+            selected_variables = st.multiselect(
+                'Variables',
+                options=filtered_variables,
+                format_func=format_variable_label,
+                default=[],
+                key='det_var_select',
+                label_visibility="collapsed"
+            )
+            
+            if not selected_variables:
+                st.info("👆 Select variables")
+                return
+    else:
+        # Fallback to original layout if controls column not available
+        # Simple model selection
+        def format_model_display(model_key):
+            source_name, _, model = all_available_models[model_key]
+            return f"{model} ({source_name})"
+        
+        selected_model_keys = st.multiselect(
+            'Select Models',
+            options=list(all_available_models.keys()),
+            default=[], 
+            key='det_model_select',
+            format_func=format_model_display
+        )
+        
+        if not selected_model_keys:
+            st.info("Please select at least one model to continue.")
+            return
+        
+        # Initialize categorizer for automatic variable grouping
+        categorizer = VariableCategorizer()
+        
+        # Get all available variables
+        variable_options = list(all_variables_map.keys())
+        
+        # Group variables by category
+        categorized_vars = categorizer.group_variables_by_category(variable_options)
+        
+        # Category filter
+        category_names = [categorizer.CATEGORIES[cat]['name'] for cat in categorized_vars.keys()]
+        selected_category = st.selectbox(
+            "Filter by Category",
+            options=["All Categories"] + category_names,
+            key='det_category_filter'
+        )
+        
+        # Filter variables based on selected category
+        if selected_category == "All Categories":
+            filtered_variables = variable_options
+        else:
+            # Find which category key this is
+            for cat_key, cat_info in categorizer.CATEGORIES.items():
+                if cat_info['name'] == selected_category:
+                    filtered_variables = categorized_vars.get(cat_key, [])
+                    break
+        
+        # Simple variable selection with enhanced labels
+        def format_variable_label(var):
+            base_label = all_variables_map[var]['label']
+            
+            # Determine sources that have this variable
+            sources_with_var = []
+            for source_name, data_source in data_sources.items():
+                # Check if variable is in this source
+                if var in data_source_var_map and source_name in data_source_var_map[var]:
+                    sources_with_var.append(source_name)
+            
+            # Add source indicator
+            if len(sources_with_var) > 1:
+                return f"🔄 {base_label} [{len(sources_with_var)} sources]"
+            else:
+                return base_label
+        
+        selected_variables = st.multiselect(
+            'Select Variables',
+            options=filtered_variables,
+            format_func=format_variable_label,
+            default=[],
+            key='det_var_select',
+            help="Variables marked with 🔄 can be compared across multiple sources"
+        )
+        
+        if not selected_variables:
+            st.info("Please select at least one variable to continue.")
+            return
     
     # Determine data type from first variable
     first_var = selected_variables[0]

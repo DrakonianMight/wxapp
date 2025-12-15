@@ -27,6 +27,19 @@ class OpenMeteoDataSource(DataSource):
             'gfs_ensemble',
         ]
     
+    @staticmethod
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _fetch_deterministic_cached(lat, lon, site, variables, data_type, models):
+        """Cached data fetching to avoid repeated API calls"""
+        lat_list = [str(lat)]
+        lon_list = [str(lon)]
+        site_list = [site]
+        
+        if data_type == 'hourly':
+            return om_extract.getData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+        else:  # daily
+            return om_extract.getDailyData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+    
     def get_deterministic_data(
         self, 
         lat: float, 
@@ -37,14 +50,13 @@ class OpenMeteoDataSource(DataSource):
         models: List[str]
     ) -> pd.DataFrame:
         """Fetch deterministic forecast data from Open-Meteo"""
-        lat_list = [str(lat)]
-        lon_list = [str(lon)]
-        site_list = [site]
-        
-        if data_type == 'hourly':
-            df = om_extract.getData(lat_list, lon_list, site_list, variables=variables, models=models)
-        else:  # daily
-            df = om_extract.getDailyData(lat_list, lon_list, site_list, variables=variables, models=models)
+        # Use cached fetch with immutable arguments
+        df = self._fetch_deterministic_cached(
+            lat, lon, site, 
+            tuple(variables),  # Convert to tuple for hashing
+            data_type, 
+            tuple(models)  # Convert to tuple for hashing
+        )
         
         # Standardize: om_extract returns time as index, but we need 'datetime' column
         if not df.empty:
@@ -62,6 +74,27 @@ class OpenMeteoDataSource(DataSource):
         
         return df
     
+    @staticmethod
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _fetch_ensemble_cached(lat, lon, site, variables, data_type, models):
+        """Cached ensemble data fetching"""
+        lat_list = [str(lat)]
+        lon_list = [str(lon)]
+        site_list = [site]
+        
+        if data_type == 'hourly':
+            # You may need to create getEnsembleData in om_extract module
+            if hasattr(om_extract, 'getEnsembleData'):
+                return om_extract.getEnsembleData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+            else:
+                # Fallback to regular getData
+                return om_extract.getData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+        else:  # daily
+            if hasattr(om_extract, 'getDailyEnsembleData'):
+                return om_extract.getDailyEnsembleData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+            else:
+                return om_extract.getDailyData(lat_list, lon_list, site_list, variables=list(variables), models=list(models))
+    
     def get_ensemble_data(
         self, 
         lat: float, 
@@ -73,22 +106,13 @@ class OpenMeteoDataSource(DataSource):
     ) -> pd.DataFrame:
         """Fetch ensemble forecast data from Open-Meteo"""
 
-        lat_list = [str(lat)]
-        lon_list = [str(lon)]
-        site_list = [site]
-        
-        if data_type == 'hourly':
-            # You may need to create getEnsembleData in om_extract module
-            if hasattr(om_extract, 'getEnsembleData'):
-                df = om_extract.getEnsembleData(lat_list, lon_list, site_list, variables=variables, models=models)
-            else:
-                # Fallback to regular getData
-                df = om_extract.getData(lat_list, lon_list, site_list, variables=variables, models=models)
-        else:  # daily
-            if hasattr(om_extract, 'getDailyEnsembleData'):
-                df = om_extract.getDailyEnsembleData(lat_list, lon_list, site_list, variables=variables, models=models)
-            else:
-                df = om_extract.getDailyData(lat_list, lon_list, site_list, variables=variables, models=models)
+        # Use cached fetch with immutable arguments
+        df = self._fetch_ensemble_cached(
+            lat, lon, site,
+            tuple(variables),  # Convert to tuple for hashing
+            data_type,
+            tuple(models)  # Convert to tuple for hashing
+        )
         
         # Standardize: om_extract returns time as index, but we need 'datetime' column
         if not df.empty:
